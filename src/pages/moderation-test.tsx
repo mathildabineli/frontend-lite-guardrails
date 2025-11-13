@@ -2,12 +2,15 @@
 'use client';
 
 import { useState } from 'react';
+import clsx from 'clsx';
 import { ModerationBanner } from '@/components/ModerationBanner';
 import { useModerationGuard } from '@/hooks/useModerationGuard';
-import clsx from 'clsx';
+import { useFeatureFlags } from '@/providers/featureFlagProvider';
 
 export default function ModerationTestPage() {
+  const flags = useFeatureFlags();
   const [input, setInput] = useState('');
+
   const {
     decision,
     loading,
@@ -18,22 +21,37 @@ export default function ModerationTestPage() {
     requestReview,
   } = useModerationGuard(input, {
     live: true,
-    debounceMs: 120,                    // tighter for near-realtime
+    debounceMs: 120, // tighter for near-realtime
     overrideEndpoint: '/api/moderation/check',
   });
 
-  // Keep typing smooth: only disable submit when actually blocked
   const canSubmit = !isBlocked;
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 py-12 px-4">
       <div className="max-w-2xl mx-auto space-y-8">
-        <header className="text-center">
+        <header className="text-center space-y-2">
           <h1 className="text-3xl font-bold text-slate-900">
             Frontend Lite Guardrails – Demo
           </h1>
-          <p className="mt-2 text-slate-600">
+          <p className="text-slate-600">
             Real-time moderation with inline warnings and override flow.
+          </p>
+
+          {/* Small flag status badge for debugging / visibility */}
+          <p className="text-xs text-slate-500">
+            Moderation:{' '}
+            <span className={flags.moderationEnabled ? 'text-emerald-600' : 'text-red-600'}>
+              {flags.moderationEnabled ? 'enabled' : 'disabled'}
+            </span>{' '}
+            · Lite model:{' '}
+            <span className={flags.moderationLiteEnabled ? 'text-emerald-600' : 'text-slate-500'}>
+              {flags.moderationLiteEnabled ? 'on' : 'off'}
+            </span>{' '}
+            · Telemetry:{' '}
+            <span className={flags.moderationTelemetryEnabled ? 'text-emerald-600' : 'text-slate-500'}>
+              {flags.moderationTelemetryEnabled ? 'on' : 'off'}
+            </span>
           </p>
         </header>
 
@@ -71,6 +89,12 @@ export default function ModerationTestPage() {
 
           {/* Error */}
           {error && <p className="text-xs text-red-600">{error}</p>}
+
+          {!flags.moderationEnabled && (
+            <p className="text-xs text-slate-500">
+              Moderation is currently disabled via feature flags — all inputs are allowed.
+            </p>
+          )}
         </div>
 
         {/* Submit */}

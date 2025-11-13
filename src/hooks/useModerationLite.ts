@@ -6,18 +6,38 @@ import {
   type ModerationDecision,
   type ModerationLabel,
 } from '@/config/moderationconfig';
+import { useFeatureFlags } from '@/providers/featureFlagProvider';
 
 export function useModerationLite(text: string) {
+  const flags = useFeatureFlags();
   const [decision, setDecision] = useState<ModerationDecision | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!flags.moderationEnabled || !flags.moderationLiteEnabled) {
+      // Return safe/allow decision
+      const emptyScores = Object.fromEntries(
+        MODERATION_LABELS.map(label => [label, label === 'safe' ? 1 : 0])
+      ) as Record<ModerationLabel, number>;
+      setDecision({
+        label: 'safe',
+        scores: emptyScores,
+        action: 'allow',
+        blocked: false,
+        shouldRequestReview: false,
+        reason: 'moderation disabled',
+        source: 'lite',
+      });
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     if (!text.trim()) {
       const emptyScores = Object.fromEntries(
         MODERATION_LABELS.map(label => [label, label === 'safe' ? 1 : 0])
       ) as Record<ModerationLabel, number>;
-
       setDecision({
         label: 'safe',
         scores: emptyScores,
@@ -27,6 +47,8 @@ export function useModerationLite(text: string) {
         reason: 'empty input',
         source: 'lite',
       });
+      setLoading(false);
+      setError(null);
       return;
     }
 
@@ -46,7 +68,8 @@ export function useModerationLite(text: string) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text }),
           });
-          const backend = await res.json();
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const backend = await res.json() as ModerationDecision;
           if (!cancelled) setDecision(backend);
         } catch {
           if (!cancelled) setError('Moderation check failed');
@@ -59,7 +82,7 @@ export function useModerationLite(text: string) {
     return () => {
       cancelled = true;
     };
-  }, [text]);
+  }, [text, flags]);
 
   return { decision, loading, error };
 }

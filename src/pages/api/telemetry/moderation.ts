@@ -3,6 +3,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 
 // Optional external forwarder (Grafana, your backend, etc.)
 const FORWARD_URL = process.env.TELEMETRY_INGEST_URL || '';
+const MODERATION_TELEMETRY_ENABLED = process.env.MODERATION_TELEMETRY_ENABLED === 'true' || false;
 
 type Event =
   | { type: 'check_performed'; label: string; action: 'allow' | 'warn' | 'block'; source?: 'lite' | 'backend'; latency_ms?: number; text_len?: number }
@@ -35,6 +36,13 @@ export const config = {
 };
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (!MODERATION_TELEMETRY_ENABLED) {
+    if (req.method === 'GET') {
+      return res.status(200).json({ ok: true, totals: { checks: 0, warnings: 0, blocks: 0, overrides_requested: 0, overrides_approved: 0, overrides_denied: 0, overrides_error: 0 } });
+    }
+    return res.status(200).json({ ok: true, forwarded: 0, stored: 0, totals: { checks: 0, warnings: 0, blocks: 0, overrides_requested: 0, overrides_approved: 0, overrides_denied: 0, overrides_error: 0 } });
+  }
+
   // Quick way to SEE totals from your browser or curl
   if (req.method === 'GET') {
     return res.status(200).json({ ok: true, totals });
@@ -90,6 +98,3 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(200).json({ ok: true, forwarded: 0, stored: 0, totals });
   }
 }
-
-
-

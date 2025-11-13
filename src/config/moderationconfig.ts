@@ -64,10 +64,11 @@ export const RISKY_CATEGORIES: ModerationLabel[] = [
   'exploitation',
   'harm',
   'illicit',
+  'informational',
 ];
 
 /** Non-risky labels. */
-export const NON_RISKY_CATEGORIES: ModerationLabel[] = ['safe', 'informational'];
+export const NON_RISKY_CATEGORIES: ModerationLabel[] = ['safe'];
 
 // Feature flags / endpoints
 export const MODERATION_FF_LITE_ENABLED = true;

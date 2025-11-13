@@ -1,6 +1,9 @@
 // src/components/ModerationBanner.tsx
+'use client';
+
 import type { ModerationDecision } from '@/config/moderationconfig';
 import clsx from 'clsx';
+import { useFeatureFlags } from '@/providers/featureFlagProvider';
 
 interface Props {
   decision: ModerationDecision;
@@ -8,7 +11,11 @@ interface Props {
   isReviewing?: boolean;
 }
 
-export function ModerationBanner({ decision, onRequestReview, isReviewing }: Props) {
+export function ModerationBanner({ decision, onRequestReview, isReviewing }: Readonly<Props>) {
+  const flags = useFeatureFlags();
+
+  if (!flags.moderationEnabled) return null;
+
   if (decision.action === 'allow') return null;
 
   const isBlock = decision.blocked;
@@ -16,6 +23,8 @@ export function ModerationBanner({ decision, onRequestReview, isReviewing }: Pro
 
   return (
     <div
+      role="alert"
+      aria-live="assertive"
       className={clsx(
         'rounded-lg p-4 flex items-center justify-between',
         isBlock
@@ -33,6 +42,8 @@ export function ModerationBanner({ decision, onRequestReview, isReviewing }: Pro
         <button
           onClick={onRequestReview}
           disabled={isReviewing}
+          aria-disabled={isReviewing ? 'true' : 'false'}
+          aria-label={isReviewing ? 'Reviewing in progress' : 'Request human review for moderation warning'}
           className={clsx(
             'ml-4 px-3 py-1 text-sm font-medium rounded transition',
             isReviewing

@@ -1,14 +1,10 @@
 // src/hooks/useModerationGuard.ts
 'use client';
-
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { runModerationLite } from '@/utils/moderationLite';
 import type { ModerationDecision } from '@/config/moderationconfig';
-import {
-  trackCheck,
-  trackOverrideRequested,
-  trackOverrideResult,
-} from '@/telemetry/moderationTelemetry';
+import { trackCheck, trackOverrideRequested, trackOverrideResult } from '@/telemetry/moderationTelemetry';
+import { useFeatureFlags } from '@/providers/featureFlagProvider';
 
 interface Options {
   debounceMs?: number;
@@ -16,18 +12,23 @@ interface Options {
   overrideEndpoint?: string;
 }
 
-// NEW: clamp any custom action (like "fallback") to the 3 telemetry buckets
+// Normalize to 3 buckets for telemetry
 function normalizeAction(d: ModerationDecision): 'allow' | 'warn' | 'block' {
   if (d.blocked) return 'block';
   if (d.action === 'warn' || d.shouldRequestReview) return 'warn';
   return 'allow';
 }
 
-/** Guard flow: lite → (fallback) backend → optional review */
 export function useModerationGuard(
   value: string,
   { debounceMs = 300, live = true, overrideEndpoint = '/api/moderation/check' }: Options = {}
 ) {
+  const flags = useFeatureFlags();
+  const disabled = !flags.moderationEnabled;
+
+  console.log('feature flags in hook', flags)
+
+  // ⬇️ Hooks must be declared unconditionally
   const [decision, setDecision] = useState<ModerationDecision | null>(null);
   const [loading, setLoading] = useState(false);
   const [isReviewing, setIsReviewing] = useState(false);
@@ -35,6 +36,14 @@ export function useModerationGuard(
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const run = useCallback(async () => {
+    if (disabled) {
+      // When disabled, present a pass-through state
+      setDecision(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     const text = value.trim();
     if (!text) {
       setDecision(null);
@@ -44,22 +53,37 @@ export function useModerationGuard(
 
     setLoading(true);
     setError(null);
-
     try {
-      // 1) Lite
       const t0 = performance.now();
-      const lite = await runModerationLite(text);
-      setDecision(lite);
+      let modDecision: ModerationDecision;
+      let source: 'lite' | 'backend' = 'lite';
 
-      trackCheck({
-        label: lite.label,
-        action: normalizeAction(lite),             // ← normalize here
-        source: (lite.source as 'lite' | 'backend') ?? 'lite',
-        latency_ms: Math.round(performance.now() - t0),
-        text_len: text.length,
-      });
+      if (flags.moderationLiteEnabled) {
+        modDecision = await runModerationLite(text);
+      } else {
+        const res = await fetch(overrideEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        modDecision = (await res.json()) as ModerationDecision;
+        source = 'backend';
+      }
+
+      setDecision(modDecision);
+
+      if (flags.moderationTelemetryEnabled) {
+        trackCheck({
+          label: modDecision.label,
+          action: normalizeAction(modDecision),
+          source: (modDecision.source as 'lite' | 'backend') ?? source,
+          latency_ms: Math.round(performance.now() - t0),
+          text_len: text.length,
+        });
+      }
     } catch {
-      // 2) Backend fallback
+      // Backend fallback if lite failed
       try {
         const t0 = performance.now();
         const res = await fetch(overrideEndpoint, {
@@ -71,34 +95,42 @@ export function useModerationGuard(
         const backend = (await res.json()) as ModerationDecision;
         setDecision(backend);
 
-        trackCheck({
-          label: backend.label,
-          action: normalizeAction(backend),        // ← and here
-          source: (backend.source as 'lite' | 'backend') ?? 'backend',
-          latency_ms: Math.round(performance.now() - t0),
-          text_len: text.length,
-        });
+        if (flags.moderationTelemetryEnabled) {
+          trackCheck({
+            label: backend.label,
+            action: normalizeAction(backend),
+            source: (backend.source as 'lite' | 'backend') ?? 'backend',
+            latency_ms: Math.round(performance.now() - t0),
+            text_len: text.length,
+          });
+        }
       } catch (err: any) {
         setError(err?.message ?? 'Moderation fallback failed');
       }
     } finally {
       setLoading(false);
     }
-  }, [value, overrideEndpoint]);
+  }, [value, overrideEndpoint, flags, disabled]);
 
   useEffect(() => {
     if (!live) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(run, debounceMs);
-    return () => { if (timer.current) clearTimeout(timer.current); };
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+    };
   }, [value, run, debounceMs, live]);
 
   const requestReview = async () => {
+    if (disabled || !flags.moderationOverrideEnabled) return;
     if (!decision || (decision.action !== 'warn' && decision.action !== 'block')) return;
+
     setIsReviewing(true);
     setError(null);
     try {
-      trackOverrideRequested(decision.label);
+      if (flags.moderationTelemetryEnabled) {
+        trackOverrideRequested(decision.label);
+      }
       const res = await fetch(overrideEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -109,10 +141,14 @@ export function useModerationGuard(
       setDecision(override);
 
       const approved = override.action !== 'block';
-      trackOverrideResult(approved ? 'approved' : 'rejected', override.label);
+      if (flags.moderationTelemetryEnabled) {
+        trackOverrideResult(approved ? 'approved' : 'rejected', override.label);
+      }
     } catch (e: any) {
       setError(e?.message ?? 'Review failed');
-      trackOverrideResult('error', decision.label);
+      if (flags.moderationTelemetryEnabled) {
+        trackOverrideResult('error', decision.label);
+      }
     } finally {
       setIsReviewing(false);
     }
@@ -121,5 +157,14 @@ export function useModerationGuard(
   const isBlocked = decision?.blocked ?? false;
   const showReview = decision?.action === 'warn' || decision?.action === 'block';
 
-  return { decision, loading, isBlocked, isReviewing, showReview, error, runCheck: run, requestReview };
+  return {
+    decision,
+    loading,
+    isBlocked,
+    isReviewing,
+    showReview,
+    error,
+    runCheck: run,
+    requestReview,
+  };
 }

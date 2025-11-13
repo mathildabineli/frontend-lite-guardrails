@@ -10,6 +10,7 @@ import {
 } from '@/config/moderationconfig';
 
 const INTERNAL_MODERATION_INFERENCE_URL = process.env.INTERNAL_MODERATION_INFERENCE_URL;
+const MODERATION_ENABLED = process.env.MODERATION_ENABLED === 'true' || false; // Non-public env
 
 export default async function handler(
   req: NextApiRequest,
@@ -26,6 +27,23 @@ export default async function handler(
 
   if (!text?.trim()) {
     return res.status(400).json({ error: 'Missing text' });
+  }
+
+  if (!MODERATION_ENABLED) {
+    // Return allow decision
+    const scores = Object.fromEntries(
+      MODERATION_LABELS.map(l => [l, l === 'safe' ? 1 : 0])
+    ) as Record<ModerationLabel, number>;
+    const allowDecision: ModerationDecision = {
+      label: 'safe',
+      scores,
+      action: 'allow',
+      blocked: false,
+      shouldRequestReview: false,
+      reason: 'moderation disabled',
+      source: 'backend',
+    };
+    return res.status(200).json(allowDecision);
   }
 
   const inputText = text.trim();

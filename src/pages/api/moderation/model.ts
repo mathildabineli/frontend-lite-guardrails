@@ -39,7 +39,13 @@ function createMinioClient() {
   });
 }
 
+const MODERATION_MODEL_ENABLED = process.env.MODERATION_MODEL_ENABLED === 'true' || false;
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (!MODERATION_MODEL_ENABLED) {
+    return res.status(403).json({ error: 'Model access disabled' });
+  }
+
   const bucket = process.env.MINIO_BUCKET || 'mlflow';
   const client = createMinioClient();
 
