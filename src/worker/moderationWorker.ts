@@ -1,7 +1,8 @@
+// src/worker/moderationWorker.ts
 /* eslint-disable no-restricted-globals */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import * as ort from 'onnxruntime-web/webgpu';
+import * as ort from 'onnxruntime-web';
 import {
   BERT_TINY_TOXICITY_CONFIG as cfg,
   type ModerationDecision,
@@ -9,27 +10,34 @@ import {
 } from '../config/moderationconfig';
 
 // -----------------------------------------------------------------------------
-// 0. ONNX Runtime CONFIG: WebGPU first, WASM fallback
+// 0. ONNX Runtime CONFIG – WASM only (simple & stable)
 // -----------------------------------------------------------------------------
 
-// Prefer WebGPU if available; ORT will fall back to WASM automatically.
-(ort.env as any).webgpu = {
-  ...(ort.env as any).webgpu,
-  powerPreference: 'high-performance',
-};
+// OPTIONAL: lower noise while debugging
+// ort.env.debug = true;
+// ort.env.logLevel = 'info';
 
-// ✅ Use CDN for WASM (no local files needed)
-ort.env.wasm.wasmPaths =
-  'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/';
-
-ort.env.wasm.numThreads = 1; // avoid crossOriginIsolated requirement
+// single-threaded → no crossOriginIsolated / COOP+COEP needed
+ort.env.wasm.numThreads = 1;
 ort.env.wasm.proxy = false;
+ort.env.wasm.simd = true;
+
+// All .wasm files live in /public/ort → served under /ort/...
+// prefix form is enough for most cases
+(ort.env.wasm as any).wasmPaths = {
+  'ort-wasm.wasm': '/ort/ort-wasm.wasm',
+  'ort-wasm-simd.wasm': '/ort/ort-wasm-simd.wasm',
+  'ort-wasm-threaded.wasm': '/ort/ort-wasm-threaded.wasm',
+  'ort-wasm-simd-threaded.wasm': '/ort/ort-wasm-simd-threaded.wasm',
+  // ORT sometimes asks for this jsep variant; alias to simd:
+  'ort-wasm-simd.jsep.wasm': '/ort/ort-wasm-simd.wasm',
+} as any;
 
 // -----------------------------------------------------------------------------
 // 1. CONFIG
 // -----------------------------------------------------------------------------
 const MODEL_FOLDER = 'toxicity-binary-text-cls';
-const PRESIGNED_API = '/api/moderation/presign'; // relative → works in prod
+const PRESIGNED_API = '/api/moderation/presign';
 const CACHE_NAME = 'lite-model-v1';
 
 // -----------------------------------------------------------------------------
@@ -76,7 +84,7 @@ class ModerationLite {
   private constructor() {}
 
   static async getInstance(
-    onProgress?: (progress: { status: string; file?: string; percent?: number }) => void
+    onProgress?: (progress: { status: string; file?: string; percent?: number }) => void,
   ): Promise<ModerationLite> {
     if (!this.instance) {
       this.instance = (async () => {
@@ -89,14 +97,15 @@ class ModerationLite {
   }
 
   private async load(
-    onProgress?: (progress: { status: string; file?: string; percent?: number }) => void
+    onProgress?: (progress: { status: string; file?: string; percent?: number }) => void,
   ) {
     onProgress?.({ status: 'initiate' });
 
-    // 1. Tokenizer
+    // 1) Tokenizer
     onProgress?.({ status: 'downloading', file: 'tokenizer.json', percent: 0 });
     const tokenizerUrl = await getPresignedUrl('tokenizer.json');
     console.log('[worker] Tokenizer URL:', tokenizerUrl);
+
     const tokenizerResp = await fetch(tokenizerUrl);
     if (!tokenizerResp.ok) {
       throw new Error(
@@ -109,7 +118,7 @@ class ModerationLite {
     );
     onProgress?.({ status: 'downloading', file: 'tokenizer.json', percent: 100 });
 
-    // 2. ONNX Model (with caching + progress)
+    // 2) ONNX model (cached)
     onProgress?.({ status: 'downloading', file: 'model.onnx', percent: 0 });
     const onnxUrl = await getPresignedUrl('model.onnx');
     console.log('[worker] Model URL:', onnxUrl);
@@ -117,9 +126,9 @@ class ModerationLite {
     const arrayBuffer = await getCachedOrFetch(onnxUrl, 'model.onnx');
     onProgress?.({ status: 'downloading', file: 'model.onnx', percent: 50 });
 
-    // 🔥 WebGPU first, WASM fallback
+    // WASM session
     this.session = await ort.InferenceSession.create(arrayBuffer, {
-      executionProviders: ['webgpu', 'wasm'],
+      executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',
     });
 

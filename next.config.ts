@@ -2,19 +2,26 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  reactCompiler: true,
+  // ⚠ Next 15 doesn’t know `reactCompiler` yet, that’s why you see the warning.
+  // If the repo insists on it, you can keep it; otherwise you can remove it.
+  // reactCompiler: true,
   reactStrictMode: true,
   webpack: (config, { isServer }) => {
-    // Only for the browser bundle
     if (!isServer) {
+      // Ensure resolve exists
       config.resolve = config.resolve || {};
+
       config.resolve.alias = {
         ...(config.resolve.alias || {}),
-        // Prevent server-only packages from being pulled into the browser
+        // Don’t ever bundle the Node runtime version in the browser
         'onnxruntime-node$': false,
-        'sharp$': false,
+        // Prevent sharp from being pulled into client chunks
+        sharp: false,
+        // If some lib tries to import 'fs', make it a no-op
+        fs: false,
       };
     }
+
     return config;
   },
   turbopack: {},
