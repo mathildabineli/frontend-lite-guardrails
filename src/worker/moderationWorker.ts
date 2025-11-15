@@ -1,198 +1,260 @@
-// src/worker/moderationWorker.ts
-import * as ort from 'onnxruntime-web'; // use main entry (WASM fallback works)
+/* eslint-disable no-restricted-globals */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import * as ort from 'onnxruntime-web/webgpu';
 import {
-  MODERATION_LABELS,
-  RISKY_CATEGORIES,
-  MODERATION_THRESHOLDS,
+  BERT_TINY_TOXICITY_CONFIG as cfg,
   type ModerationDecision,
   type ModerationLabel,
 } from '../config/moderationconfig';
 
-let session: ort.InferenceSession | null = null;
-let tokenizer: { encode: (text: string) => Int32Array } | null = null;
-let inited = false;
+// -----------------------------------------------------------------------------
+// 0. ONNX Runtime CONFIG: WebGPU first, WASM fallback
+// -----------------------------------------------------------------------------
 
-type FileEntry = { file: string; url: string };
+// Prefer WebGPU if available; ORT will fall back to WASM automatically.
+(ort.env as any).webgpu = {
+  ...(ort.env as any).webgpu,
+  powerPreference: 'high-performance',
+};
 
-const CACHE_DB = 'moderation-lite-v3';
-const CACHE_STORE = 'artifacts';
+// ✅ Use CDN for WASM (no local files needed)
+ort.env.wasm.wasmPaths =
+  'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/';
 
-async function getCached(file: string): Promise<ArrayBuffer | null> {
-  return new Promise((resolve) => {
-    const open = indexedDB.open(CACHE_DB, 1);
-    open.onupgradeneeded = (e) => {
-      const db = (e.target as any).result;
-      db.createObjectStore(CACHE_STORE);
+ort.env.wasm.numThreads = 1; // avoid crossOriginIsolated requirement
+ort.env.wasm.proxy = false;
+
+// -----------------------------------------------------------------------------
+// 1. CONFIG
+// -----------------------------------------------------------------------------
+const MODEL_FOLDER = 'toxicity-binary-text-cls';
+const PRESIGNED_API = '/api/moderation/presign'; // relative → works in prod
+const CACHE_NAME = 'lite-model-v1';
+
+// -----------------------------------------------------------------------------
+// 2. Cache Helper (IndexedDB via Cache API)
+// -----------------------------------------------------------------------------
+async function getCachedOrFetch(url: string, file: string): Promise<ArrayBuffer> {
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(url);
+  if (cached) {
+    console.log(`[worker] Using cached ${file}`);
+    return cached.arrayBuffer();
+  }
+
+  console.log(`[worker] Downloading ${file}...`);
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`${file} fetch failed: ${resp.status} ${resp.statusText}`);
+  const buffer = await resp.arrayBuffer();
+  await cache.put(url, new Response(buffer));
+  return buffer;
+}
+
+// -----------------------------------------------------------------------------
+// 3. Presigned URL
+// -----------------------------------------------------------------------------
+async function getPresignedUrl(file: string): Promise<string> {
+  const url = `${PRESIGNED_API}?file=${MODEL_FOLDER}/${file}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Presign failed for ${file}: ${resp.status}`);
+  const data = await resp.json();
+  if (!data.url) throw new Error(`Invalid presign response: ${JSON.stringify(data)}`);
+  return data.url;
+}
+
+// -----------------------------------------------------------------------------
+// 4. Singleton Model Loader
+// -----------------------------------------------------------------------------
+class ModerationLite {
+  static instance: Promise<ModerationLite> | null = null;
+
+  private session!: ort.InferenceSession;
+  private vocab!: Map<string, number>;
+  private specialTokens = { '[CLS]': 101, '[SEP]': 102, '[UNK]': 100 };
+
+  private constructor() {}
+
+  static async getInstance(
+    onProgress?: (progress: { status: string; file?: string; percent?: number }) => void
+  ): Promise<ModerationLite> {
+    if (!this.instance) {
+      this.instance = (async () => {
+        const lite = new ModerationLite();
+        await lite.load(onProgress);
+        return lite;
+      })();
+    }
+    return this.instance;
+  }
+
+  private async load(
+    onProgress?: (progress: { status: string; file?: string; percent?: number }) => void
+  ) {
+    onProgress?.({ status: 'initiate' });
+
+    // 1. Tokenizer
+    onProgress?.({ status: 'downloading', file: 'tokenizer.json', percent: 0 });
+    const tokenizerUrl = await getPresignedUrl('tokenizer.json');
+    console.log('[worker] Tokenizer URL:', tokenizerUrl);
+    const tokenizerResp = await fetch(tokenizerUrl);
+    if (!tokenizerResp.ok) {
+      throw new Error(
+        `Tokenizer fetch failed: ${tokenizerResp.status} ${tokenizerResp.statusText}`,
+      );
+    }
+    const tokenizerData = await tokenizerResp.json();
+    this.vocab = new Map(
+      Object.entries(tokenizerData.model.vocab).map(([k, v]) => [k, Number(v)]),
+    );
+    onProgress?.({ status: 'downloading', file: 'tokenizer.json', percent: 100 });
+
+    // 2. ONNX Model (with caching + progress)
+    onProgress?.({ status: 'downloading', file: 'model.onnx', percent: 0 });
+    const onnxUrl = await getPresignedUrl('model.onnx');
+    console.log('[worker] Model URL:', onnxUrl);
+
+    const arrayBuffer = await getCachedOrFetch(onnxUrl, 'model.onnx');
+    onProgress?.({ status: 'downloading', file: 'model.onnx', percent: 50 });
+
+    // 🔥 WebGPU first, WASM fallback
+    this.session = await ort.InferenceSession.create(arrayBuffer, {
+      executionProviders: ['webgpu', 'wasm'],
+      graphOptimizationLevel: 'all',
+    });
+
+    onProgress?.({ status: 'downloading', file: 'model.onnx', percent: 100 });
+    console.log('[worker] Lite model ready (cached for next load)');
+    onProgress?.({ status: 'ready' });
+  }
+
+  private tokenize(text: string): { input_ids: BigInt64Array; attention_mask: BigInt64Array } {
+    const tokens: number[] = [this.specialTokens['[CLS]']];
+    const words = text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, '')
+      .split(/\s+/)
+      .filter(Boolean);
+
+    for (const word of words) {
+      tokens.push(this.vocab.get(word) ?? this.specialTokens['[UNK]']);
+    }
+    tokens.push(this.specialTokens['[SEP]']);
+
+    const input_ids = new BigInt64Array(tokens.map(BigInt));
+    const attention_mask = new BigInt64Array(tokens.length).fill(BigInt(1));
+
+    return { input_ids, attention_mask };
+  }
+
+  async classify(text: string): Promise<Array<{ label: string; score: number }>> {
+    const { input_ids, attention_mask } = this.tokenize(text);
+
+    const feeds: Record<string, ort.Tensor> = {
+      input_ids: new ort.Tensor('int64', input_ids, [1, input_ids.length]),
+      attention_mask: new ort.Tensor('int64', attention_mask, [1, attention_mask.length]),
     };
-    open.onsuccess = (e) => {
-      const db = (e.target as any).result;
-      const tx = db.transaction(CACHE_STORE);
-      const get = tx.objectStore(CACHE_STORE).get(file);
-      get.onsuccess = () => resolve(get.result ?? null);
-    };
-    open.onerror = () => resolve(null);
-  });
+
+    const results = await this.session.run(feeds);
+    const logits = results.logits.data as Float32Array;
+
+    const max = Math.max(...logits);
+    const exps = Array.from(logits).map((x) => Math.exp(x - max));
+    const sum = exps.reduce((a, b) => a + b, 0);
+    const probs = exps.map((x) => x / sum);
+
+    return [
+      { label: 'not-toxic', score: probs[0] },
+      { label: 'toxic', score: probs[1] },
+    ];
+  }
 }
 
-async function setCached(file: string, buffer: ArrayBuffer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const open = indexedDB.open(CACHE_DB, 1);
-    open.onsuccess = (e) => {
-      const db = (e.target as any).result;
-      const tx = db.transaction(CACHE_STORE, 'readwrite');
-      tx.objectStore(CACHE_STORE).put(buffer, file);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject();
-    };
-  });
-}
+// -----------------------------------------------------------------------------
+// 5. Worker Messaging
+// -----------------------------------------------------------------------------
+type WorkerMessage =
+  | { type: 'infer'; text: string; requestId: number }
+  | { type: string; [key: string]: any };
 
-function sigmoid(x: number) {
-  return 1 / (1 + Math.exp(-x));
-}
-function makeAttentionMask(length: number): BigInt64Array {
-  return BigInt64Array.from({ length }, () => 1n);
-}
 function post(type: string, payload: any = {}) {
   (self as any).postMessage({ type, ...payload });
 }
-function postError(message: string, requestId?: number) {
-  post('error', { message, requestId });
+
+function safeDecision(reason: string): ModerationDecision {
+  const safeLabel = (cfg.safeLabels[0] ?? 'not-toxic') as ModerationLabel;
+  const scores: Record<ModerationLabel, number> = {} as any;
+  for (const label of cfg.labels) {
+    scores[label as ModerationLabel] = label === safeLabel ? 1 : 0;
+  }
+  return {
+    label: safeLabel,
+    scores,
+    action: 'allow',
+    blocked: false,
+    shouldRequestReview: false,
+    reason,
+    source: 'lite',
+  };
 }
 
-globalThis.onmessage = async (e) => {
-  const { type, payload, requestId } = e.data;
+// -----------------------------------------------------------------------------
+// 6. Main Loop
+// -----------------------------------------------------------------------------
+self.addEventListener('message', async (event: MessageEvent<WorkerMessage>) => {
+  const { type, text, requestId } = event.data;
+  if (type !== 'infer') return;
 
-  if (type === 'init') {
-    try {
-      const { wasmBaseUrl, files } = payload as { wasmBaseUrl: string; files: FileEntry[] };
+  try {
+    const trimmed = (text || '').trim();
+    if (!trimmed) {
+      post('result', { decision: safeDecision('empty input'), requestId });
+      return;
+    }
 
-      // ORT WASM config (single-thread to avoid COOP/COEP)
-      const base = wasmBaseUrl.endsWith('/') ? wasmBaseUrl : wasmBaseUrl + '/';
-      ort.env.wasm.simd = true;
-      ort.env.wasm.numThreads = 1;
-      ort.env.wasm.proxy = false;
-      ort.env.wasm.wasmPaths = base;
+    const lite = await ModerationLite.getInstance((progress) => {
+      post('status', { ...progress, requestId });
+    });
 
-      const ortAny = ort as any;
-      if (typeof ortAny.init === 'function') {
-        await ortAny.init();
-      } else if (typeof ortAny.setWasmPaths === 'function') {
-        ortAny.setWasmPaths(base);
+    const outputs = await lite.classify(trimmed);
+
+    const scores: Record<ModerationLabel, number> = {} as any;
+    for (const label of cfg.labels) scores[label as ModerationLabel] = 0;
+    for (const { label, score } of outputs) {
+      const lbl = label.toLowerCase();
+      if (cfg.labels.includes(lbl as any)) {
+        scores[lbl as ModerationLabel] = score;
       }
-
-      // Fetch artifacts (with caching)
-      const map = new Map<string, ArrayBuffer>();
-      await Promise.all(
-        (files as FileEntry[]).map(async ({ file, url }) => {
-          const cached = await getCached(file);
-          if (cached) {
-            map.set(file, cached);
-            return;
-          }
-          const r = await fetch(url);
-          if (!r.ok) throw new Error(`Failed to download ${file} (${r.status})`);
-          const buf = await r.arrayBuffer();
-          await setCached(file, buf);
-          map.set(file, buf);
-        })
-      );
-
-      // Minimal tokenizer (vocab.txt + special_tokens_map.json)
-      const vocabTxt = new TextDecoder().decode(map.get('vocab.txt')!);
-      const specialTokens = JSON.parse(new TextDecoder().decode(map.get('special_tokens_map.json')!));
-
-      const vocab = new Map<string, number>();
-      vocabTxt.split('\n').forEach((line, i) => {
-        const token = line.trim();
-        if (token) vocab.set(token, i);
-      });
-
-      const cls = typeof specialTokens.cls_token_id === 'number' ? specialTokens.cls_token_id : 101;
-      const sep = typeof specialTokens.sep_token_id === 'number' ? specialTokens.sep_token_id : 102;
-      const unk = typeof specialTokens.unk_token_id === 'number' ? specialTokens.unk_token_id : 100;
-
-      tokenizer = {
-        encode: (text: string): Int32Array => {
-          const lower = text.toLowerCase();
-          const tokens = lower.split(/\s+/).slice(0, 126);
-          const ids = tokens.map(t => vocab.get(t) ?? unk);
-          return new Int32Array([cls, ...ids, sep]);
-        },
-      };
-
-      // Create ORT session (WebGPU if available, otherwise WASM)
-      const modelBuf = map.get('model_quantized.onnx')!;
-      const providers: ort.InferenceSession.ExecutionProviderName[] = ['webgpu', 'wasm'];
-      session = await ort.InferenceSession.create(new Uint8Array(modelBuf), {
-        executionProviders: providers,
-        graphOptimizationLevel: 'all',
-      });
-
-      inited = true;
-      post('ready');
-    } catch (err: any) {
-      postError(`Init failed: ${err?.message || String(err)}`);
-    }
-  }
-
-  if (type === 'infer') {
-    if (!inited || !session || !tokenizer) {
-      return postError('Infer called before init', requestId);
     }
 
-    try {
-      const { text } = payload as { text: string };
-      const inputIds = tokenizer.encode(text);
-
-      const inputTensor = new ort.Tensor(
-        'int64',
-        BigInt64Array.from(inputIds, v => BigInt(v)),
-        [1, inputIds.length]
-      );
-
-      const feeds: Record<string, ort.Tensor> = {};
-      const inputs = session.inputNames;
-      if (inputs.includes('input_ids')) feeds['input_ids'] = inputTensor;
-      if (inputs.includes('attention_mask')) {
-        feeds['attention_mask'] = new ort.Tensor('int64', makeAttentionMask(inputIds.length), [1, inputIds.length]);
+    let maxRisk = 0;
+    let topRisk: ModerationLabel = (cfg.safeLabels[0] as ModerationLabel) ?? 'not-toxic';
+    for (const label of cfg.riskyLabels) {
+      const s = scores[label as ModerationLabel] ?? 0;
+      if (s > maxRisk) {
+        maxRisk = s;
+        topRisk = label as ModerationLabel;
       }
-
-      const result = await session.run(feeds);
-      const outName = session.outputNames[0] ?? 'logits';
-      const logits = (result as any)[outName].data as Float32Array;
-      const probs = Array.from(logits, sigmoid);
-
-      const scores = Object.fromEntries(
-        MODERATION_LABELS.map((l, i) => [l, probs[i] ?? 0])
-      ) as Record<ModerationLabel, number>;
-
-      let maxRisk = 0;
-      let topRisk: ModerationLabel = 'safe';
-      RISKY_CATEGORIES.forEach(l => {
-        if (scores[l] > maxRisk) {
-          maxRisk = scores[l];
-          topRisk = l;
-        }
-      });
-
-      const action =
-        maxRisk >= MODERATION_THRESHOLDS.blockCritical ? 'block' :
-        maxRisk >= MODERATION_THRESHOLDS.warnAny ? 'warn' : 'allow';
-
-      const decision: ModerationDecision = {
-        label: topRisk,
-        scores,
-        action,
-        blocked: action === 'block',
-        shouldRequestReview: action === 'warn',
-        reason: `Lite: ${action} (${(maxRisk * 100).toFixed(1)}% ${topRisk})`,
-        source: 'lite',
-      };
-
-      post('result', { decision, requestId });
-    } catch (err: any) {
-      postError(`Infer failed: ${err?.message || String(err)}`, requestId);
     }
+
+    const { block, warn } = cfg.thresholds;
+    const action = maxRisk >= block ? 'block' : maxRisk >= warn ? 'warn' : 'allow';
+    const safeLabel = (cfg.safeLabels[0] ?? 'not-toxic') as ModerationLabel;
+
+    const decision: ModerationDecision = {
+      label: action === 'allow' ? safeLabel : topRisk,
+      scores,
+      action,
+      blocked: action === 'block',
+      shouldRequestReview: action === 'warn',
+      reason: `Lite (${cfg.id}): ${action} (${(maxRisk * 100).toFixed(1)}% ${topRisk})`,
+      source: 'lite',
+    };
+
+    post('result', { decision, requestId });
+  } catch (err: any) {
+    const message = err?.message || String(err);
+    console.error('[worker] error:', err);
+    post('error', { requestId, message });
   }
-};
+});

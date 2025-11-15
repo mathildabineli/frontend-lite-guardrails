@@ -1,151 +1,130 @@
 // src/utils/moderationLite.ts
-import { MODERATION_LABELS, type ModerationDecision } from '@/config/moderationconfig';
+import {
+  type ModerationDecision,
+  type ModerationLabel,
+  getActiveLiteModelConfig,
+} from '@/config/moderationconfig';
 
 let worker: Worker | null = null;
-let readyPromise: Promise<void> | null = null;
+
+// Resolve active lite model once (at build/runtime)
+const activeLiteConfig = getActiveLiteModelConfig();
 
 function getWorker() {
   if (!worker) {
-    worker = new Worker(new URL('../worker/moderationWorker.ts', import.meta.url), { type: 'module' });
+    worker = new Worker(
+      new URL('../worker/moderationWorker.ts', import.meta.url),
+      { type: 'module' },
+    );
   }
   return worker;
 }
 
-function withTrailingSlash(s: string) {
-  return s.endsWith('/') ? s : s + '/';
-}
+function makeSafeScores(): Record<ModerationLabel, number> {
+  if (!activeLiteConfig) return {};
+  const scores: Record<ModerationLabel, number> = {} as any;
+  const safeLabel = activeLiteConfig.safeLabels[0];
 
-const USE_PROXY = (process.env.NEXT_PUBLIC_MODEL_PROXY || '') === '1';
-
-type FileEntry = { file: string; url: string };
-
-async function getFilesForInit(): Promise<FileEntry[]> {
-  if (USE_PROXY) {
-    // Same-origin streaming: no CORS needed
-    const names = [
-      'model_quantized.onnx',
-      'tokenizer.json',
-      'config.json',
-      'vocab.txt',
-      'special_tokens_map.json',
-      'tokenizer_config.json',
-    ];
-    return names.map((n) => ({
-      file: n,
-      url: `${location.origin}/api/moderation/model?file=${encodeURIComponent(n)}`
-    }));
+  for (const label of activeLiteConfig.labels) {
+    scores[label as ModerationLabel] =
+      label === safeLabel ? 1 : 0;
   }
-
-  // Presigned URL mode (CORS required on MinIO bucket)
-  const res = await fetch('/api/moderation/model');
-  if (!res.ok) throw new Error(`model manifest HTTP ${res.status}`);
-  const data = await res.json();
-  const files = (Array.isArray(data?.files) ? data.files : []) as FileEntry[];
-  if (!files.length) throw new Error('model manifest empty');
-  return files;
-}
-
-async function ensureReady() {
-  if (!readyPromise) {
-    readyPromise = new Promise((resolve, reject) => {
-      const w = getWorker();
-
-      const onMessage = (e: MessageEvent) => {
-        if (e.data?.type === 'ready') {
-          cleanup();
-          resolve();
-        } else if (e.data?.type === 'error') {
-          console.error('[moderation worker error]', e.data?.message);
-          cleanup();
-          reject(new Error(e.data?.message || 'Worker init error'));
-        }
-      };
-
-      const onError = (err: ErrorEvent) => {
-        cleanup();
-        reject(err.error || new Error(err.message));
-      };
-
-      const cleanup = () => {
-        w.removeEventListener('message', onMessage);
-        w.removeEventListener('error', onError);
-        clearTimeout(timeout);
-      };
-
-      w.addEventListener('message', onMessage);
-      w.addEventListener('error', onError);
-
-      (async () => {
-        try {
-          const wasmBaseUrl = withTrailingSlash(`${location.origin}/ort`);
-          const files = await getFilesForInit();
-          w.postMessage({ type: 'init', payload: { wasmBaseUrl, files } });
-        } catch (e: any) {
-          cleanup();
-          reject(e instanceof Error ? e : new Error(String(e)));
-        }
-      })();
-
-      // Big model (~136 MB) → give time to download + init
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error('Worker init timed out (45s).'));
-      }, 45_000);
-    });
-  }
-  await readyPromise;
+  return scores;
 }
 
 let nextRequestId = 1;
+let hasLiteLoadedOnce = false; // 👈 track warmup completion
 
-export async function runModerationLite(text: string): Promise<ModerationDecision> {
-  if (!text.trim()) {
+export async function runModerationLite(
+  text: string,
+): Promise<ModerationDecision> {
+  // If no model config, just always allow
+  if (!activeLiteConfig) {
     return {
       label: 'safe',
-      scores: Object.fromEntries(MODERATION_LABELS.map(l => [l, l === 'safe' ? 1 : 0])) as any,
+      scores: {},
+      action: 'allow',
+      blocked: false,
+      shouldRequestReview: false,
+      reason: 'no lite model config',
+      source: 'lite',
+    };
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {
+      label: (activeLiteConfig.safeLabels[0] ??
+        'safe') as ModerationLabel,
+      scores: makeSafeScores(),
       action: 'allow',
       blocked: false,
       shouldRequestReview: false,
       reason: 'empty input',
       source: 'lite',
-    } as ModerationDecision;
+    };
   }
 
-  await ensureReady();
   const w = getWorker();
   const requestId = nextRequestId++;
 
-  return new Promise((resolve, reject) => {
-    const handler = (e: MessageEvent) => {
+  return new Promise<ModerationDecision>((resolve, reject) => {
+    const handleMessage = (e: MessageEvent) => {
       const d = e.data;
-      if (d?.type === 'result' && d?.requestId === requestId) {
+      if (!d) return;
+
+      if (d.type === 'result' && d.requestId === requestId) {
         cleanup();
+        hasLiteLoadedOnce = true; // ✅ warmup finished successfully
         resolve(d.decision as ModerationDecision);
-      } else if (d?.type === 'error' && d?.requestId === requestId) {
+      } else if (d.type === 'error' && d.requestId === requestId) {
         cleanup();
-        reject(new Error(d?.message || 'Worker inference error'));
+        reject(
+          new Error(
+            d.message || 'Lite worker inference error',
+          ),
+        );
       }
+      // We ignore "status" messages here; they are only for optional UI.
     };
 
-    const onErr = (err: Event | ErrorEvent) => {
+    const handleError = (err: Event | ErrorEvent) => {
       cleanup();
-      reject(err instanceof ErrorEvent ? err.error : new Error('Worker error'));
+      reject(
+        err instanceof ErrorEvent
+          ? err.error || new Error(err.message)
+          : new Error('Lite worker error'),
+      );
     };
 
     const cleanup = () => {
-      w.removeEventListener('message', handler);
-      w.removeEventListener('error', onErr);
-      clearTimeout(timeout);
+      w.removeEventListener('message', handleMessage);
+      w.removeEventListener('error', handleError);
+      if (timeout) clearTimeout(timeout);
     };
 
-    w.addEventListener('message', handler);
-    w.addEventListener('error', onErr);
+    w.addEventListener('message', handleMessage);
+    w.addEventListener('error', handleError);
 
+    // ⏱️ Timeout:
+    //  - generous for *first* call (warmup: download + init + inference)
+    //  - strict for later calls (3s inference SLA)
+    const timeoutMs = hasLiteLoadedOnce ? 3_000 : 60_000;
     const timeout = setTimeout(() => {
       cleanup();
-      reject(new Error('Lite inference timeout (3s).'));
-    }, 3_000);
+      reject(
+        new Error(
+          hasLiteLoadedOnce
+            ? 'Lite inference timeout (3s).'
+            : 'Lite warmup timeout (60s).',
+        ),
+      );
+    }, timeoutMs);
 
-    w.postMessage({ type: 'infer', payload: { text }, requestId });
+    w.postMessage({
+      type: 'infer',
+      text: trimmed,
+      requestId,
+    });
   });
 }

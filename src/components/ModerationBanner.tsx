@@ -15,11 +15,16 @@ export function ModerationBanner({ decision, onRequestReview, isReviewing }: Rea
   const flags = useFeatureFlags();
 
   if (!flags.moderationEnabled) return null;
-
   if (decision.action === 'allow') return null;
 
   const isBlock = decision.blocked;
-  const score = (decision.scores[decision.label] * 100).toFixed(1);
+  //const score = (decision.scores[decision.label] * 100).toFixed(1);
+  const isLite = decision.source === 'lite';
+
+  const mainLabel = isBlock ? 'BLOCKED' : 'WARNING';
+
+  const idleButtonLabel = isLite ? 'Request review' : 'Recheck';
+  const busyButtonLabel = isLite ? 'Reviewing…' : 'Rechecking…';
 
   return (
     <div
@@ -33,25 +38,34 @@ export function ModerationBanner({ decision, onRequestReview, isReviewing }: Rea
       )}
     >
       <div className="flex items-center gap-2">
-        <strong>{isBlock ? 'BLOCKED' : 'WARNING'}</strong>:
-        <span>{decision.label} ({score}%)</span>
+        <strong>{mainLabel}</strong>:
+
         <span className="text-xs opacity-70">[{decision.source}]</span>
       </div>
 
-      {!isBlock && onRequestReview && (
+      {onRequestReview && (decision.action === 'warn' || decision.action === 'block') && (
         <button
+          type="button"
           onClick={onRequestReview}
           disabled={isReviewing}
           aria-disabled={isReviewing ? 'true' : 'false'}
-          aria-label={isReviewing ? 'Reviewing in progress' : 'Request human review for moderation warning'}
+          aria-label={
+            isReviewing
+              ? `${idleButtonLabel} in progress`
+              : `${idleButtonLabel} for this moderated content`
+          }
           className={clsx(
             'ml-4 px-3 py-1 text-sm font-medium rounded transition',
             isReviewing
-              ? 'bg-amber-300 text-amber-700 cursor-wait'
+              ? isBlock
+                ? 'bg-red-300 text-red-800 cursor-wait'
+                : 'bg-amber-300 text-amber-700 cursor-wait'
+              : isBlock
+              ? 'bg-red-600 text-white hover:bg-red-700'
               : 'bg-amber-600 text-white hover:bg-amber-700'
           )}
         >
-          {isReviewing ? 'Reviewing…' : 'Request review'}
+          {isReviewing ? busyButtonLabel : idleButtonLabel}
         </button>
       )}
     </div>

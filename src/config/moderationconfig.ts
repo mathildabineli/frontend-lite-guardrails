@@ -1,75 +1,113 @@
-// src/config/moderationconfig.ts
+// src/config/moderationConfig.ts
 
-/**
- * Labels must match the model's id2label mapping exactly.
- *
- *  "id2label": {
- *    "0": "harassment",
- *    "1": "violence",
- *    "2": "sexual",
- *    "3": "exploitation",
- *    "4": "harm",
- *    "5": "illicit",
- *    "6": "informational",
- *    "7": "safe"
- *  }
- */
-export const MODERATION_LABELS = [
-  'harassment',
-  'violence',
-  'sexual',
-  'exploitation',
-  'harm',
-  'illicit',
-  'informational',
-  'safe',
-] as const;
-
-export type ModerationLabel = (typeof MODERATION_LABELS)[number];
+// Labels are now generic strings so we can plug different models.
+export type ModerationLabel = string;
 
 export type ModerationAction = 'allow' | 'warn' | 'block' | 'fallback';
 
 export interface ModerationDecision {
-  label: ModerationLabel;
-  scores: Record<ModerationLabel, number>;
+  label: ModerationLabel;                  // winning label (e.g. "toxic", "harassment", "safe")
+  scores: Record<ModerationLabel, number>; // per-label probabilities
   action: ModerationAction;
   blocked: boolean;
   shouldRequestReview: boolean;
   reason: string;
-  /** Where the decision came from – lite (WebWorker) or backend */
   source: 'lite' | 'backend';
 }
 
 /**
- * Thresholds for the **lite client-side check**.
- * Tune empirically; these are sane starting values.
+ * Generic config describing any moderation model (lite or backend).
+ * This is what makes the system pluggable.
  */
-export const MODERATION_THRESHOLDS = {
-  blockCritical: 0.35, // Any risky label ≥ 0.50 → block
-  warnAny: 0.3,       // Any risky label ≥ 0.40 → warn + review
+export interface ModerationModelConfig {
+  /** Internal id for the model (used in envs / selection) */
+  id: string;
+
+  /** "binary" (safe/unsafe) or "multilabel" (many categories) */
+  kind: 'binary' | 'multilabel';
+
+  /** Exact label list in the model's id2label order */
+  labels: ModerationLabel[];
+
+  /** Which labels are considered "risky" vs "safe" */
+  riskyLabels: ModerationLabel[];
+  safeLabels: ModerationLabel[];
+
+  /** Thresholds for the frontend decision logic */
+  thresholds: {
+    block: number;   // ≥ block => block
+    warn: number;    // ≥ warn  => warn  (if < block)
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Lite model: gravitee-io/bert-tiny-toxicity (binary)               */
+/* ------------------------------------------------------------------ */
+
+export const BERT_TINY_TOXICITY_CONFIG: ModerationModelConfig = {
+  id: 'bert-tiny-toxicity',
+  kind: 'binary',
+  // Must match the ONNX / HF model labels:
+  // usually id2label: {0: "not-toxic", 1: "toxic"}
+  labels: ['not-toxic', 'toxic'],
+  riskyLabels: ['toxic'],
+  safeLabels: ['not-toxic'],
+
+  // Start conservative; you can tune later from telemetry:
+  thresholds: {
+    warn: 0.43,   // >= 0.25 toxic -> warn
+    block: 0.5,  // >= 0.45 toxic -> block
+  },
 };
 
+/* ------------------------------------------------------------------ */
+/*  Backend full model (example: mDeBERTa multi-label)                */
+/*  Keep your previous categories here; this is just an example.      */
+/* ------------------------------------------------------------------ */
+
+export const BACKEND_MULTILABEL_CONFIG: ModerationModelConfig = {
+  id: 'mdeberta-multilabel',
+  kind: 'multilabel',
+  labels: [
+    'harassment',
+    'violence',
+    'sexual',
+    'exploitation',
+    'harm',
+    'illicit',
+    'informational',
+    'safe',
+  ],
+  riskyLabels: [
+    'harassment',
+    'violence',
+    'sexual',
+    'exploitation',
+    'harm',
+    'illicit',
+    'informational',
+  ],
+  safeLabels: ['safe'],
+  thresholds: {
+    warn: 0.3,
+    block: 0.35,
+  },
+};
+
+/* ------------------------------------------------------------------ */
+/*  Active lite model selection                                      */
+/* ------------------------------------------------------------------ */
+
 /**
- * Thresholds for **backend full model** (often stricter/more calibrated).
- * Adjust to your real backend calibration. Comments match values.
+ * Map of known lite models – you can add more later.
  */
-export const MODERATION_THRESHOLD_BLOCK = 0.35 // ≥70% → block
-export const MODERATION_THRESHOLD_WARN  = 0.3; // ≥50% → warn
+const LITE_MODELS: Record<string, ModerationModelConfig> = {
+  [BERT_TINY_TOXICITY_CONFIG.id]: BERT_TINY_TOXICITY_CONFIG,
+};
 
-/** Categories considered risky. */
-export const RISKY_CATEGORIES: ModerationLabel[] = [
-  'harassment',
-  'violence',
-  'sexual',
-  'exploitation',
-  'harm',
-  'illicit',
-  'informational',
-];
+export function getActiveLiteModelConfig(): ModerationModelConfig | null {
+  const id =
+    process.env.NEXT_PUBLIC_LITE_MODEL_ID || 'bert-tiny-toxicity'; // default
 
-/** Non-risky labels. */
-export const NON_RISKY_CATEGORIES: ModerationLabel[] = ['safe'];
-
-// Feature flags / endpoints
-export const MODERATION_FF_LITE_ENABLED = true;
-export const MODERATION_FALLBACK_ENDPOINT = '/api/moderation/check';
+  return LITE_MODELS[id] ?? null;
+}

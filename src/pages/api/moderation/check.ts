@@ -1,16 +1,16 @@
 // src/pages/api/moderation/check.ts
 import type { NextApiRequest, NextApiResponse } from 'next';
 import {
-  MODERATION_LABELS,
+  BACKEND_MULTILABEL_CONFIG,
   type ModerationLabel,
   type ModerationDecision,
-  MODERATION_THRESHOLD_BLOCK,
-  MODERATION_THRESHOLD_WARN,
-  RISKY_CATEGORIES,
 } from '@/config/moderationconfig';
 
-const INTERNAL_MODERATION_INFERENCE_URL = process.env.INTERNAL_MODERATION_INFERENCE_URL;
-const MODERATION_ENABLED = process.env.MODERATION_ENABLED === 'true' || false; // Non-public env
+const INTERNAL_MODERATION_INFERENCE_URL =
+  process.env.INTERNAL_MODERATION_INFERENCE_URL;
+
+const MODERATION_ENABLED =
+  process.env.MODERATION_ENABLED === 'true' || false; // Non-public env
 
 export default async function handler(
   req: NextApiRequest,
@@ -29,38 +29,50 @@ export default async function handler(
     return res.status(400).json({ error: 'Missing text' });
   }
 
-  if (!MODERATION_ENABLED) {
-    // Return allow decision
-    const scores = Object.fromEntries(
-      MODERATION_LABELS.map(l => [l, l === 'safe' ? 1 : 0])
-    ) as Record<ModerationLabel, number>;
-    const allowDecision: ModerationDecision = {
-      label: 'safe',
+  const cfg = BACKEND_MULTILABEL_CONFIG;
+  const safeLabel: ModerationLabel = (cfg.safeLabels[0] ??
+    'safe') as ModerationLabel;
+
+  // Helper to build a “safe / allow” decision (used when disabled or errors)
+  const makeSafeDecision = (reason: string): ModerationDecision => {
+    const scores: Record<ModerationLabel, number> = {} as any;
+    for (const label of cfg.labels) {
+      scores[label as ModerationLabel] =
+        (label as ModerationLabel) === safeLabel ? 1 : 0;
+    }
+    return {
+      label: safeLabel,
       scores,
       action: 'allow',
       blocked: false,
       shouldRequestReview: false,
-      reason: 'moderation disabled',
+      reason,
       source: 'backend',
     };
-    return res.status(200).json(allowDecision);
+  };
+
+  if (!MODERATION_ENABLED || !INTERNAL_MODERATION_INFERENCE_URL) {
+    return res.status(200).json(makeSafeDecision('moderation disabled'));
   }
 
   const inputText = text.trim();
   let backendError = false;
-  let scores: Record<ModerationLabel, number> = Object.fromEntries(
-    MODERATION_LABELS.map(l => [l, 0])
-  ) as any;
+
+  // Initialise scores with 0 for all known labels
+  const scores: Record<ModerationLabel, number> = {} as any;
+  for (const label of cfg.labels) {
+    scores[label as ModerationLabel] = 0;
+  }
 
   let maxRisk = 0;
-  let topRisk: ModerationLabel = 'safe';
+  let topRisk: ModerationLabel = safeLabel;
 
   try {
-    const response = await fetch(INTERNAL_MODERATION_INFERENCE_URL!, {
+    const response = await fetch(INTERNAL_MODERATION_INFERENCE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        inputs: { inputs: [inputText] }, // your backend expects array
+        inputs: { inputs: [inputText] }, // backend expects array
       }),
     });
 
@@ -73,11 +85,13 @@ export default async function handler(
     const flat = Array.isArray(level1[0]) ? level1[0] : level1;
 
     (flat as any[]).forEach((item: { label: string; score: number }) => {
-      const label = item.label?.toLowerCase() as ModerationLabel;
-      if (MODERATION_LABELS.includes(label)) {
-        scores[label] = item.score;
-        if (RISKY_CATEGORIES.includes(label) && item.score > maxRisk) {
-          maxRisk = item.score;
+      const label = item.label as ModerationLabel;
+      if (cfg.labels.includes(label)) {
+        const s = typeof item.score === 'number' ? item.score : 0;
+        scores[label] = s;
+
+        if (cfg.riskyLabels.includes(label) && s > maxRisk) {
+          maxRisk = s;
           topRisk = label;
         }
       }
@@ -87,18 +101,21 @@ export default async function handler(
     backendError = true;
   }
 
-  // Ensure "safe" isn't missing entirely
-  if (scores.safe === 0) {
-    const riskyMax = Math.max(...RISKY_CATEGORIES.map(l => scores[l] ?? 0), 0);
-    scores.safe = Math.max(1 - riskyMax, 0);
+  // Ensure safe label isn't missing entirely
+  if (scores[safeLabel] === 0) {
+    const riskyMax = Math.max(
+      ...cfg.riskyLabels.map((l) => scores[l as ModerationLabel] ?? 0),
+      0
+    );
+    scores[safeLabel] = Math.max(1 - riskyMax, 0);
   }
 
+  const { block, warn } = cfg.thresholds;
   const action =
-    maxRisk >= MODERATION_THRESHOLD_BLOCK ? 'block' :
-    maxRisk >= MODERATION_THRESHOLD_WARN ? 'warn' : 'allow';
+    maxRisk >= block ? 'block' : maxRisk >= warn ? 'warn' : 'allow';
 
   const decision: ModerationDecision = {
-    label: topRisk,
+    label: action === 'allow' ? safeLabel : topRisk,
     scores,
     action,
     blocked: action === 'block',
@@ -109,7 +126,7 @@ export default async function handler(
     source: 'backend',
   };
 
-  // Audit
+  // Optional audit of client vs server decision (still only on submission)
   if (clientDecision) {
     console.log('[moderation-audit]', {
       input: inputText,
@@ -119,5 +136,5 @@ export default async function handler(
     });
   }
 
-  res.status(200).json(decision);
+  return res.status(200).json(decision);
 }
