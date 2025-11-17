@@ -1,6 +1,5 @@
 // next.config.ts
 import type { NextConfig } from 'next';
-
 const nextConfig: NextConfig = {
   // ⚠ Next 15 doesn’t know `reactCompiler` yet, that’s why you see the warning.
   // If the repo insists on it, you can keep it; otherwise you can remove it.
@@ -10,7 +9,6 @@ const nextConfig: NextConfig = {
     if (!isServer) {
       // Ensure resolve exists
       config.resolve = config.resolve || {};
-
       config.resolve.alias = {
         ...(config.resolve.alias || {}),
         // Don’t ever bundle the Node runtime version in the browser
@@ -21,10 +19,8 @@ const nextConfig: NextConfig = {
         fs: false,
       };
     }
-
     return config;
   },
   turbopack: {},
 };
-
 export default nextConfig;

@@ -1,7 +1,8 @@
+
 // src/components/ModerationBanner.tsx
 'use client';
 
-import type { ModerationDecision } from '@/config/moderationconfig';
+import type { ModerationDecision, ModerationLabel } from '@/config/moderationconfig';
 import clsx from 'clsx';
 import { useFeatureFlags } from '@/providers/featureFlagProvider';
 
@@ -11,36 +12,51 @@ interface Props {
   isReviewing?: boolean;
 }
 
-export function ModerationBanner({ decision, onRequestReview, isReviewing }: Readonly<Props>) {
+export function ModerationBanner({
+  decision,
+  onRequestReview,
+  isReviewing,
+}: Readonly<Props>) {
   const flags = useFeatureFlags();
-
   if (!flags.moderationEnabled) return null;
   if (decision.action === 'allow') return null;
 
   const isBlock = decision.blocked;
-  //const score = (decision.scores[decision.label] * 100).toFixed(1);
   const isLite = decision.source === 'lite';
 
-  const mainLabel = isBlock ? 'BLOCKED' : 'WARNING';
-
+  const mainLabel = isBlock ? 'Blocked' : 'Warning';
   const idleButtonLabel = isLite ? 'Request review' : 'Recheck';
   const busyButtonLabel = isLite ? 'Reviewing…' : 'Rechecking…';
+
+  const predictedLabel = decision.label as ModerationLabel;
+  const prettyCategory = predictedLabel.replace(/-/g, ' '); // e.g. "not-toxic" → "not toxic"
 
   return (
     <div
       role="alert"
       aria-live="assertive"
       className={clsx(
-        'rounded-lg p-4 flex items-center justify-between',
+        'flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-xs sm:text-sm shadow-sm',
         isBlock
-          ? 'bg-red-100 border border-red-400 text-red-800'
-          : 'bg-amber-100 border border-amber-400 text-amber-800'
+          ? 'bg-red-50 border-red-200 text-red-800'
+          : 'bg-amber-50 border-amber-200 text-amber-800',
       )}
     >
-      <div className="flex items-center gap-2">
-        <strong>{mainLabel}</strong>:
+      <div className="flex items-center gap-2 min-w-0">
+      
 
-        <span className="text-xs opacity-70">[{decision.source}]</span>
+        <div className="flex flex-col min-w-0">
+          <span className="font-semibold truncate">
+            {mainLabel}
+            <span className="ml-1 text-[10px] uppercase tracking-wide opacity-60">
+              
+            </span>
+          </span>
+          <span className="text-[11px] sm:text-xs truncate">
+            
+            <span className="font-medium">{prettyCategory}</span>
+          </span>
+        </div>
       </div>
 
       {onRequestReview && (decision.action === 'warn' || decision.action === 'block') && (
@@ -55,14 +71,12 @@ export function ModerationBanner({ decision, onRequestReview, isReviewing }: Rea
               : `${idleButtonLabel} for this moderated content`
           }
           className={clsx(
-            'ml-4 px-3 py-1 text-sm font-medium rounded transition',
+            'shrink-0 rounded-full px-3 py-1 text-[11px] font-medium transition',
             isReviewing
-              ? isBlock
-                ? 'bg-red-300 text-red-800 cursor-wait'
-                : 'bg-amber-300 text-amber-700 cursor-wait'
+              ? 'bg-slate-200 text-slate-500 cursor-wait'
               : isBlock
               ? 'bg-red-600 text-white hover:bg-red-700'
-              : 'bg-amber-600 text-white hover:bg-amber-700'
+              : 'bg-amber-600 text-white hover:bg-amber-700',
           )}
         >
           {isReviewing ? busyButtonLabel : idleButtonLabel}

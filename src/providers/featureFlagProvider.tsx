@@ -2,16 +2,13 @@
 'use client';
 import { createContext, useContext, useState, ReactNode, useEffect } from 'react';
 import { defaultFlags, type FeatureFlags } from '@/config/featureFlagsconfig';
-
 const FeatureFlagContext = createContext<FeatureFlags>(defaultFlags);
-
 // tiny stable hash → 0..99
 function hashBucket(s: string): number {
   let h = 2166136261 >>> 0;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   return (h >>> 0) % 100;
 }
-
 // stable per-session id (no PII)
 function getSessionId(): string {
   try {
@@ -25,23 +22,18 @@ function getSessionId(): string {
     return 'anon';
   }
 }
-
 const rolloutPct = Number(
   process.env.NEXT_PUBLIC_ROLLOUT_MODERATION_PERCENT ?? '0'
 ); // 0..100
-
 export function FeatureFlagProvider({ children }: { children: ReactNode }) {
   const [flags, setFlags] = useState<FeatureFlags>(defaultFlags);
-
   useEffect(() => {
     // Base from env/defaults
     let f = { ...defaultFlags };
-
     // Cohort bucketing for gradual rollout
     const sid = getSessionId();
     const bucket = hashBucket(sid); // 0..99
     const inRollout = bucket < rolloutPct;
-
     // If user falls in rollout cohort, enable the feature(s)
     if (inRollout) {
       f.moderationEnabled = true;
@@ -53,23 +45,19 @@ export function FeatureFlagProvider({ children }: { children: ReactNode }) {
       // Optionally hard-off outside cohort (keeps gradual rollout honest)
       f.moderationEnabled = false;
     }
-
     setFlags(f);
-
     // (Optional) expose for quick debugging in dev
     if (process.env.NODE_ENV !== 'production') {
       (window as any).__flags = { bucket, rolloutPct, flags: f };
       // console.log('Feature flags', { bucket, rolloutPct, flags: f });
     }
   }, []);
-
   return (
     <FeatureFlagContext.Provider value={flags}>
       {children}
     </FeatureFlagContext.Provider>
   );
 }
-
 export function useFeatureFlags() {
   return useContext(FeatureFlagContext);
 }

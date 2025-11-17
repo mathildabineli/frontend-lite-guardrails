@@ -4,7 +4,7 @@
 import { useState } from 'react';
 import clsx from 'clsx';
 import { ModerationBanner } from '@/components/ModerationBanner';
-import { useModerationGuard } from '@/hooks/useModerationGuard';
+import { useModerationGuard } from '@/hooks/useModerationLite';
 import { useFeatureFlags } from '@/providers/featureFlagProvider';
 
 export default function ModerationTestPage() {
@@ -25,7 +25,7 @@ export default function ModerationTestPage() {
     error,
     requestReview,
   } = useModerationGuard(submittedText, {
-    // Runs only when submittedText changes (i.e., on form submit)
+    // Live guardrails while typing (debounced)
     live: true,
     debounceMs: 120,
     overrideEndpoint: '/api/moderation/check',
@@ -36,7 +36,6 @@ export default function ModerationTestPage() {
     const trimmed = input.trim();
     if (!trimmed) return;
 
-    // 👉 Only here do we actually send text for moderation
     setSubmittedText(trimmed);
   };
 
@@ -94,9 +93,18 @@ export default function ModerationTestPage() {
         </header>
 
         <form className="space-y-3" onSubmit={handleSubmit}>
-          <label className="block text-sm font-medium text-slate-700">
+          <label className="block text-sm font-medium text-slate-700 mb-1">
             Research Query / Comment
           </label>
+
+          {/* 🔼 Banner ABOVE the text field */}
+          {decision && decision.action !== 'allow' && (
+            <ModerationBanner
+              decision={decision}
+              onRequestReview={showReview ? requestReview : undefined}
+              isReviewing={isReviewing}
+            />
+          )}
 
           <textarea
             value={input}
@@ -113,17 +121,17 @@ export default function ModerationTestPage() {
             )}
           />
 
-          {loading && <p className="text-xs text-slate-500">Checking…</p>}
-
-          {decision && (
-            <ModerationBanner
-              decision={decision}
-              onRequestReview={showReview ? requestReview : undefined}
-              isReviewing={isReviewing}
-            />
+          {loading && (
+            <p className="text-xs text-slate-500">
+              Checking…
+            </p>
           )}
 
-          {error && <p className="text-xs text-red-600">{error}</p>}
+          {error && (
+            <p className="text-xs text-red-600">
+              {error}
+            </p>
+          )}
 
           {!flags.moderationEnabled && (
             <p className="text-xs text-slate-500">

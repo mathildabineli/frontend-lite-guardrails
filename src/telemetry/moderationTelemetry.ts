@@ -1,7 +1,6 @@
 // Lightweight telemetry client for moderation events.
 // Batches events and POSTs to /api/telemetry/moderation.
 // Never include raw user text here.
-
 type CheckEvent = {
   v: 1;
   ts: number;
@@ -14,7 +13,6 @@ type CheckEvent = {
   latency_ms?: number;
   text_len?: number;
 };
-
 type OverrideReqEvent = {
   v: 1;
   ts: number;
@@ -23,7 +21,6 @@ type OverrideReqEvent = {
   type: 'override_requested';
   label: string;
 };
-
 type OverrideResEvent = {
   v: 1;
   ts: number;
@@ -33,16 +30,12 @@ type OverrideResEvent = {
   outcome: 'approved' | 'rejected' | 'error';
   label: string;
 };
-
 type Event = CheckEvent | OverrideReqEvent | OverrideResEvent;
-
 const ENDPOINT = '/api/telemetry/moderation';
 const MAX_BATCH = 50;
 const FLUSH_MS = 1500;
-
 let queue: Event[] = [];
 let timer: number | null = null;
-
 function sid(): string {
   try {
     const k = 'ts_sid';
@@ -55,7 +48,6 @@ function sid(): string {
     return 'anon';
   }
 }
-
 function route(): string {
   try {
     return location.pathname || '/';
@@ -63,7 +55,6 @@ function route(): string {
     return '/';
   }
 }
-
 function push(ev: Event) {
   queue.push(ev);
   if (queue.length >= MAX_BATCH) flush();
@@ -74,7 +65,6 @@ function push(ev: Event) {
     }, FLUSH_MS);
   }
 }
-
 export function flush() {
   if (queue.length === 0) return;
   const payload = { events: queue.slice() };
@@ -91,11 +81,9 @@ export function flush() {
     keepalive: true,
   }).catch(() => {});
 }
-
 function base() {
   return { v: 1 as const, ts: Date.now(), sid: sid(), route: route() };
 }
-
 // ---- Public API ----
 export function trackCheck(args: {
   label: string;
@@ -106,15 +94,12 @@ export function trackCheck(args: {
 }) {
   push({ ...base(), type: 'check_performed', ...args });
 }
-
 export function trackOverrideRequested(label: string) {
   push({ ...base(), type: 'override_requested', label });
 }
-
 export function trackOverrideResult(outcome: 'approved' | 'rejected' | 'error', label: string) {
   push({ ...base(), type: 'override_result', outcome, label });
 }
-
 // Flush on page hide/unload
 if (typeof window !== 'undefined') {
   addEventListener('visibilitychange', () => {

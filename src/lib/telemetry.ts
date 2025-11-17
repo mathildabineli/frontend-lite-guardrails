@@ -9,7 +9,6 @@ export type TelemetryCounters = {
   source_lite: number;
   source_backend: number;
 };
-
 const counters: TelemetryCounters = {
   checks: 0,
   warns: 0,
@@ -20,7 +19,6 @@ const counters: TelemetryCounters = {
   source_lite: 0,
   source_backend: 0,
 };
-
 export function recordEvents(events: any[]) {
   for (const e of events) {
     if (e.type === 'check_performed') {
@@ -37,7 +35,6 @@ export function recordEvents(events: any[]) {
     }
   }
 }
-
 export function snapshotCounters(): TelemetryCounters {
   return { ...counters };
 }
